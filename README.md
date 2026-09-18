@@ -15,6 +15,11 @@ AMD64 Windows와 **macOS Sequoia 15.5 이상인 Apple Silicon Mac**을 대상으
 Mac의 Excel 연동은 처음 사용할 때 자동화 권한을 허용해야 합니다.
 거부했다면 시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 이 앱(소스 실행 시 터미널/Python)의 Excel 제어를 허용합니다.
 
+Mac의 Excel은 샌드박스 앱이라 시스템 임시 폴더에 저장하려 하면 "파일 접근 권한 부여" 창이 떠서
+취소하면 저장이 실패합니다. 그래서 **현재 시트**의 임시 사본은 Excel 자신의 컨테이너 폴더
+(`~/Library/Containers/com.microsoft.Excel/Data/SpDocumentsConverter`) 안에 저장하므로 권한 창 없이 저장됩니다.
+컨테이너 폴더가 없거나 만들 수 없으면 시스템 임시 폴더를 사용합니다.
+
 ## 개발 환경 준비
 
 Windows에서는 AMD64(64비트) Python을 설치하고 Tcl/Tk를 포함합니다. PowerShell에서:

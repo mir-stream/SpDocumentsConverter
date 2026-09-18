@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -66,7 +67,8 @@ class DesktopOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Excel을 실행'):
                 excel_access.active_book()
 
-    def test_snapshot_uses_source_instance_and_releases_temporary_files(self):
+    @staticmethod
+    def _snapshot_book():
         book = MagicMock()
         snapshot = book.app.books.add.return_value
 
@@ -78,7 +80,16 @@ class DesktopOperationTests(unittest.TestCase):
             workbook.close()
 
         snapshot.save.side_effect = save
-        with patch.object(excel_access, 'active_book', return_value=book):
+        return book, snapshot
+
+    @staticmethod
+    def _system_temp_snapshots():
+        # Snapshots of a mock book must never reach a developer Mac's real Excel container.
+        return patch.object(excel_access, 'snapshot_directory', return_value=None)
+
+    def test_snapshot_uses_source_instance_and_releases_temporary_files(self):
+        book, snapshot = self._snapshot_book()
+        with self._system_temp_snapshots(), patch.object(excel_access, 'active_book', return_value=book):
             with excel_access.active_sheet() as sheet:
                 self.assertEqual(next(sheet.values), ('한글', 42))
                 path = Path(snapshot.save.call_args.args[0])
@@ -92,11 +103,51 @@ class DesktopOperationTests(unittest.TestCase):
         book.close.assert_not_called()
         book.save.assert_not_called()
 
+    def test_snapshot_stays_inside_the_mac_excel_sandbox_container(self):
+        book, snapshot = self._snapshot_book()
+        with TemporaryDirectory() as home:
+            container = Path(home) / 'Library/Containers/com.microsoft.Excel/Data'
+            container.mkdir(parents=True)
+            with patch.object(excel_access.sys, 'platform', 'darwin'), \
+                    patch.object(excel_access.Path, 'home', return_value=Path(home)), \
+                    patch.object(excel_access, 'active_book', return_value=book):
+                with excel_access.active_sheet() as sheet:
+                    self.assertEqual(next(sheet.values), ('한글', 42))
+                    path = Path(snapshot.save.call_args.args[0])
+                    self.assertEqual(path.parent.parent, container / 'SpDocumentsConverter')
+                    self.assertTrue(path.is_file())
+                self.assertFalse(path.parent.exists())
+
+    def test_snapshot_falls_back_to_system_temp_without_an_excel_container(self):
+        book, snapshot = self._snapshot_book()
+        with TemporaryDirectory() as home:
+            with patch.object(excel_access.sys, 'platform', 'darwin'), \
+                    patch.object(excel_access.Path, 'home', return_value=Path(home)):
+                self.assertIsNone(excel_access.snapshot_directory())
+                with patch.object(excel_access, 'active_book', return_value=book):
+                    with excel_access.active_sheet():
+                        path = Path(snapshot.save.call_args.args[0])
+                        self.assertEqual(path.parent.parent, Path(tempfile.gettempdir()))
+            self.assertFalse(Path(home, 'Library').exists())
+
+    def test_snapshot_falls_back_to_system_temp_when_the_container_folder_is_unusable(self):
+        with TemporaryDirectory() as home:
+            container = Path(home) / 'Library/Containers/com.microsoft.Excel/Data'
+            container.mkdir(parents=True)
+            (container / 'SpDocumentsConverter').write_text('a stray file of that name')
+            with patch.object(excel_access.sys, 'platform', 'darwin'), \
+                    patch.object(excel_access.Path, 'home', return_value=Path(home)):
+                self.assertIsNone(excel_access.snapshot_directory())
+
+    def test_windows_snapshot_keeps_using_the_system_temp(self):
+        with patch.object(excel_access.sys, 'platform', 'win32'):
+            self.assertIsNone(excel_access.snapshot_directory())
+
     def test_failed_snapshot_closes_only_the_copy(self):
         book = MagicMock()
         snapshot = book.app.books.add.return_value
         snapshot.save.side_effect = OSError('cannot save')
-        with patch.object(excel_access, 'active_book', return_value=book):
+        with self._system_temp_snapshots(), patch.object(excel_access, 'active_book', return_value=book):
             with self.assertRaisesRegex(OSError, 'cannot save'):
                 with excel_access.active_sheet():
                     self.fail('A failed snapshot must not be exposed')
@@ -129,6 +180,7 @@ class DesktopOperationTests(unittest.TestCase):
         caught = None
         writer = None
         with TemporaryDirectory() as output_directory, \
+                self._system_temp_snapshots(), \
                 patch.object(excel_access, 'active_book', return_value=book), \
                 patch.object(ecount_writer_module, 'getTempDir', return_value=output_directory), \
                 patch.object(ecount_writer_module, 'open_file', side_effect=opener_error):

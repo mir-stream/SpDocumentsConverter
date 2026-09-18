@@ -1,6 +1,7 @@
 """Read saved workbooks or take a temporary snapshot of desktop Excel."""
 
 import io
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,29 @@ import openpyxl
 
 
 SNAPSHOT_SHEET = 'ConverterInput'
+
+
+def snapshot_directory():
+    """Return the parent for the snapshot temp directory, or None for system temp.
+
+    Mac Excel is sandboxed, so saving into /private/var/folders/.../T/ triggers a
+    "파일 접근 권한 부여" (Grant File Access) prompt and fails with OSERROR -50 when
+    it is cancelled. Its own container is writable without a prompt, so keep an
+    own folder there instead of Data/tmp, which Office sweeps for its scratch files.
+    """
+    if sys.platform != 'darwin':
+        return None
+    container = Path.home() / 'Library/Containers/com.microsoft.Excel/Data'
+    if not container.is_dir():
+        return None
+    directory = container / 'SpDocumentsConverter'
+    try:
+        directory.mkdir(exist_ok=True)
+    except OSError:
+        # An unwritable container or a stray file of that name is not worth an
+        # error box; fall back to the system temp folder (which may prompt).
+        return None
+    return directory
 
 
 def sheet_names(path):
@@ -47,7 +71,7 @@ def active_book():
 def active_sheet():
     book = active_book()
     sheet = book.sheets.active
-    with TemporaryDirectory(prefix='spdocuments-') as directory:
+    with TemporaryDirectory(prefix='spdocuments-', dir=snapshot_directory()) as directory:
         path = Path(directory) / 'input.xlsx'
         snapshot = None
         try:
