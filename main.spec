@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 import platform
 import struct
 import sys
@@ -55,7 +56,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch='arm64' if is_macos else None,
-    codesign_identity=None,
+    codesign_identity=(os.environ.get('MACOS_CODESIGN_IDENTITY') or None) if is_macos else None,
     entitlements_file=str(root / 'packaging/macos-entitlements.plist') if is_macos else None,
 )
 coll = COLLECT(
