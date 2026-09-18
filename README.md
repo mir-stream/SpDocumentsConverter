@@ -75,7 +75,9 @@ python -m PyInstaller --noconfirm main.spec
 - AMD64 Windows 결과: `dist/SpDocumentsConverter/SpDocumentsConverter.exe`.
   배포할 때는 같은 폴더의 `_internal` 등도 함께 전달합니다.
 - Mac 결과: `dist/SpDocumentsConverter.app` (arm64, 최소 macOS 15.5).
-  Tcl/Tk 및 품목 조회표 두 개가 포함되며 Excel 자동화 권한 설명도 설정됩니다.
+  Tcl/Tk 및 품목 조회표 두 개(`soo_lu.xlsx`, `happy_lu.xlsx`)가 포함되며 Excel 자동화 권한 설명도 설정됩니다.
+  번들에 넣는 파일 이름은 ASCII만 사용합니다. 한글 파일명은 받는 쪽 압축 해제 도구의 유니코드 정규화(NFC/NFD)로
+  이름이 바뀌어 서명 봉인이 깨지고 "a sealed resource is missing or invalid"로 실행이 차단될 수 있습니다.
 - 빌드는 각 운영체제에서 실행합니다. Windows에서 Mac 앱을 빌드하거나 반대로 빌드하지 않습니다.
 - Python과 라이브러리는 결과물에 포함되므로 배포받는 사람은 별도로 설치하지 않아도 됩니다.
   현재 시트 / 선택 영역 기능을 쓰는 사람에게는 Microsoft Excel이 필요합니다.

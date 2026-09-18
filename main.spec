@@ -30,7 +30,7 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=[(str(root / 'src/read/toggle' / name), 'src/read/toggle')
-           for name in ('수건어물LU.xlsx', '행복앤미소LU.xlsx')],
+           for name in ('soo_lu.xlsx', 'happy_lu.xlsx')],  # ASCII 파일명: 한글 이름은 압축 해제 시 NFC/NFD 정규화로 서명 봉인이 깨질 수 있음
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

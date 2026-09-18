@@ -10,8 +10,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from src.definitions import getRootDir
 
-SOO_LU_FILE_PATH = Path(getRootDir()) / 'read' / 'toggle' / '수건어물LU.xlsx'
-HAPPY_LU_FILE_PATH = Path(getRootDir()) / 'read' / 'toggle' / '행복앤미소LU.xlsx'
+SOO_LU_FILE_PATH = Path(getRootDir()) / 'read' / 'toggle' / 'soo_lu.xlsx'  # 수건어물 품목 조회표 (ASCII 파일명: 서명 봉인 유지)
+HAPPY_LU_FILE_PATH = Path(getRootDir()) / 'read' / 'toggle' / 'happy_lu.xlsx'  # 행복앤미소 품목 조회표
 TITLES = [None, '네이버기준품목명', None, '출고지시서품목명', '납품단가', '납품수량', '유형']
 SOO_PACKAGE_FEE = 600
 
