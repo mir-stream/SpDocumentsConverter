@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 import platform
 import struct
 import sys
@@ -30,7 +31,7 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=[(str(root / 'src/read/toggle' / name), 'src/read/toggle')
-           for name in ('수건어물LU.xlsx', '행복앤미소LU.xlsx')],
+           for name in ('soo_lu.xlsx', 'happy_lu.xlsx')],  # ASCII 파일명: 한글 이름은 압축 해제 시 NFC/NFD 정규화로 서명 봉인이 깨질 수 있음
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -55,7 +56,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch='arm64' if is_macos else None,
-    codesign_identity=None,
+    codesign_identity=(os.environ.get('MACOS_CODESIGN_IDENTITY') or None) if is_macos else None,
     entitlements_file=str(root / 'packaging/macos-entitlements.plist') if is_macos else None,
 )
 coll = COLLECT(

@@ -15,6 +15,11 @@ AMD64 Windows와 **macOS Sequoia 15.5 이상인 Apple Silicon Mac**을 대상으
 Mac의 Excel 연동은 처음 사용할 때 자동화 권한을 허용해야 합니다.
 거부했다면 시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 이 앱(소스 실행 시 터미널/Python)의 Excel 제어를 허용합니다.
 
+Mac의 Excel은 샌드박스 앱이라 파일을 저장할 때 "파일 접근 권한 부여" 창이 뜨고, 취소하면 저장이 실패합니다.
+그래서 Mac에서는 **현재 시트** 기능이 Excel에 파일 저장을 요청하지 않고, 자동화로 셀 값만 읽어
+메모리에서 사본을 만들기 때문에 권한 창이 나타나지 않습니다.
+Windows에서는 지금까지처럼 시스템 임시 폴더에 임시 사본을 저장해 사용합니다.
+
 ## 개발 환경 준비
 
 Windows에서는 AMD64(64비트) Python을 설치하고 Tcl/Tk를 포함합니다. PowerShell에서:
@@ -70,7 +75,9 @@ python -m PyInstaller --noconfirm main.spec
 - AMD64 Windows 결과: `dist/SpDocumentsConverter/SpDocumentsConverter.exe`.
   배포할 때는 같은 폴더의 `_internal` 등도 함께 전달합니다.
 - Mac 결과: `dist/SpDocumentsConverter.app` (arm64, 최소 macOS 15.5).
-  Tcl/Tk 및 품목 조회표 두 개가 포함되며 Excel 자동화 권한 설명도 설정됩니다.
+  Tcl/Tk 및 품목 조회표 두 개(`soo_lu.xlsx`, `happy_lu.xlsx`)가 포함되며 Excel 자동화 권한 설명도 설정됩니다.
+  번들에 넣는 파일 이름은 ASCII만 사용합니다. 한글 파일명은 받는 쪽 압축 해제 도구의 유니코드 정규화(NFC/NFD)로
+  이름이 바뀌어 서명 봉인이 깨지고 "a sealed resource is missing or invalid"로 실행이 차단될 수 있습니다.
 - 빌드는 각 운영체제에서 실행합니다. Windows에서 Mac 앱을 빌드하거나 반대로 빌드하지 않습니다.
 - Python과 라이브러리는 결과물에 포함되므로 배포받는 사람은 별도로 설치하지 않아도 됩니다.
   현재 시트 / 선택 영역 기능을 쓰는 사람에게는 Microsoft Excel이 필요합니다.
@@ -84,10 +91,85 @@ Mac 빌드는 `macos-15` 러너에서 수행하며, 앱의 최소 버전을 15.5
 
 러너의 `macos-15` 라벨은 정확히 15.5를 고정하지 않습니다. 위 검사는 바이너리에 선언된 최소 버전을 확인하며,
 실제 배포 검증에는 macOS 15.5에서 GUI 시작, Excel 현재 시트·선택 영역 변환, 결과 파일 열기도 포함합니다.
-Mac 배포 압축에는 `.app`의 실행 권한과 심볼릭 링크를 보존합니다. Developer ID 서명·공증은 이 설정에 포함하지 않습니다.
+Mac 배포 압축에는 `.app`의 실행 권한과 심볼릭 링크를 보존합니다.
+기본 빌드와 GitHub Actions 결과물은 ad-hoc 서명이며, 아래 절차로 Developer ID 서명과 공증을 추가할 수 있습니다.
 
 자동 테스트는 Excel을 제어하지 않습니다. 실제 Excel에서 현재 시트 복사, 선택 영역 읽기,
 생성된 파일 열기와 Mac의 최초 권한 요청은 각 운영체제에서 별도로 확인합니다.
+
+## Mac 외부 배포: Developer ID 서명과 공증
+
+유료 Apple Developer 계정의 **Developer ID Application** 인증서와 개인 키가 이 Mac의 키체인에 있어야 합니다.
+Xcode → Settings → Apple Accounts(또는 Accounts)에서 유료 개발자 팀을 선택하고,
+Manage Certificates → + → Developer ID Application으로 발급합니다.
+`Apple Development`는 개발용 인증서이므로 이 배포 절차에 사용하지 않습니다.
+설치된 서명 인증서의 정확한 이름은 다음 명령으로 확인합니다.
+
+```sh
+security find-identity -v -p codesigning
+```
+
+앞서 준비한 macOS 15.5 호환 Python 환경에서 인증서 이름을 지정해 빌드합니다.
+PyInstaller가 포함된 라이브러리와 앱을 함께 서명하고 Hardened Runtime을 적용합니다.
+결과는 기본 빌드와 구분하여 `dist/release`에 생성합니다.
+
+```sh
+MACOS_CODESIGN_IDENTITY='Developer ID Application: YOUR_NAME (TEAM_ID)' \
+MACOSX_DEPLOYMENT_TARGET=15.5 \
+python -m PyInstaller --clean --noconfirm \
+  --distpath dist/release --workpath build/release main.spec
+
+codesign --verify --deep --strict dist/release/SpDocumentsConverter.app
+```
+
+빌드와 서명 검사가 성공하면 **공증 없이 서명한 앱을 내부 공유**할 수도 있습니다.
+
+```sh
+ditto -c -k --sequesterRsrc --keepParent \
+  dist/release/SpDocumentsConverter.app dist/SpDocumentsConverter-macos-arm64-signed.zip
+```
+
+이 ZIP을 받은 사람은 압축을 풀고 앱을 응용 프로그램 폴더로 옮깁니다.
+공증이 없으므로 첫 실행이 차단될 수 있습니다. 직접 전달받은 이 앱을 실행하려면,
+한 번 실행을 시도한 다음 시스템 설정 → 개인정보 보호 및 보안 → **그래도 열기**로 허용합니다.
+이 앱에 대한 예외가 저장되면 이후에는 두 번 클릭해 실행할 수 있습니다.
+회사 관리 정책이 예외 허용을 제한하는 Mac에서는 관리자 확인이 필요합니다.
+자세한 절차는 [Apple 앱 실행 안내](https://support.apple.com/ko-kr/102445)를 참고합니다.
+
+**공증 검증까지 통과하는 배포본**을 만들려면 다음 절차를 이어서 수행합니다.
+공증은 Apple이 앱의 악성 코드와 서명 문제를 자동 검사하는 과정이며, 제출에는 별도 로그인이 필요합니다.
+[Apple 계정에서 앱 암호를 생성](https://support.apple.com/ko-kr/102654)한 뒤,
+아래 명령의 이메일과 Team ID를 해당 개발자 계정 값으로 바꾸어 본인 터미널에서 한 번 실행합니다.
+앱 암호는 명령 실행 후 나타나는 보안 입력란에 입력하며, 소스나 명령 인자에 저장하지 않습니다.
+
+```sh
+xcrun notarytool store-credentials "SpDocumentsConverter" \
+  --apple-id 'APPLE_ID_EMAIL' --team-id 'TEAM_ID'
+```
+
+공증용 ZIP을 만들어 Apple에 제출합니다.
+
+```sh
+ditto -c -k --sequesterRsrc --keepParent \
+  dist/release/SpDocumentsConverter.app build/SpDocumentsConverter-notary.zip
+xcrun notarytool submit build/SpDocumentsConverter-notary.zip \
+  --keychain-profile "SpDocumentsConverter" --wait
+```
+
+결과가 **Accepted**일 때 앱에 공증 티켓을 붙이고 검증합니다.
+
+```sh
+xcrun stapler staple dist/release/SpDocumentsConverter.app &&
+xcrun stapler validate dist/release/SpDocumentsConverter.app &&
+codesign --verify --deep --strict dist/release/SpDocumentsConverter.app &&
+spctl --assess --type execute --verbose=4 dist/release/SpDocumentsConverter.app &&
+ditto -c -k --sequesterRsrc --keepParent \
+  dist/release/SpDocumentsConverter.app dist/SpDocumentsConverter-macos-arm64-notarized.zip
+```
+
+전달할 파일은 마지막에 만든 `dist/SpDocumentsConverter-macos-arm64-notarized.zip`입니다.
+공증 제출용 ZIP에는 아직 티켓이 붙지 않았으므로, 티켓을 붙인 앱을 다시 압축해 전달합니다.
+서명·공증 후에도 실제 대상 Mac에서 앱 실행과 Excel 자동화 권한·변환을 확인합니다.
 
 ## 참고
 
@@ -95,3 +177,5 @@ Mac 배포 압축에는 `.app`의 실행 권한과 심볼릭 링크를 보존합
 - [xlwings 설치 및 운영체제별 의존성](https://docs.xlwings.org/en/stable/installation.html)
 - [PyInstaller macOS 앱 빌드](https://pyinstaller.org/en/stable/usage.html#building-macos-app-bundles)
 - [PyInstaller macOS 하위 버전 호환성](https://pyinstaller.org/en/stable/usage.html#making-macos-apps-forward-compatible)
+- [Apple Developer ID 인증서](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
+- [Apple 공증 절차](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
