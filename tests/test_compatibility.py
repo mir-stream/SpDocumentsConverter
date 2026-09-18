@@ -1,11 +1,11 @@
 import contextlib
+import datetime
 import hashlib
 import importlib
 import io
 import json
 from pathlib import Path
 import sys
-import tempfile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -83,13 +83,13 @@ class DesktopOperationTests(unittest.TestCase):
         return book, snapshot
 
     @staticmethod
-    def _system_temp_snapshots():
-        # Snapshots of a mock book must never reach a developer Mac's real Excel container.
-        return patch.object(excel_access, 'snapshot_directory', return_value=None)
+    def _on_windows():
+        # The file-based snapshot is the Windows path; Mac never asks Excel to save.
+        return patch.object(excel_access.sys, 'platform', 'win32')
 
     def test_snapshot_uses_source_instance_and_releases_temporary_files(self):
         book, snapshot = self._snapshot_book()
-        with self._system_temp_snapshots(), patch.object(excel_access, 'active_book', return_value=book):
+        with self._on_windows(), patch.object(excel_access, 'active_book', return_value=book):
             with excel_access.active_sheet() as sheet:
                 self.assertEqual(next(sheet.values), ('한글', 42))
                 path = Path(snapshot.save.call_args.args[0])
@@ -103,51 +103,133 @@ class DesktopOperationTests(unittest.TestCase):
         book.close.assert_not_called()
         book.save.assert_not_called()
 
-    def test_snapshot_stays_inside_the_mac_excel_sandbox_container(self):
-        book, snapshot = self._snapshot_book()
-        with TemporaryDirectory() as home:
-            container = Path(home) / 'Library/Containers/com.microsoft.Excel/Data'
-            container.mkdir(parents=True)
-            with patch.object(excel_access.sys, 'platform', 'darwin'), \
-                    patch.object(excel_access.Path, 'home', return_value=Path(home)), \
-                    patch.object(excel_access, 'active_book', return_value=book):
-                with excel_access.active_sheet() as sheet:
-                    self.assertEqual(next(sheet.values), ('한글', 42))
-                    path = Path(snapshot.save.call_args.args[0])
-                    self.assertEqual(path.parent.parent, container / 'SpDocumentsConverter')
-                    self.assertTrue(path.is_file())
-                self.assertFalse(path.parent.exists())
+    @staticmethod
+    def _mac_book(values, precise, last_row=None, last_column=None):
+        book = MagicMock()
+        sheet = book.sheets.active
+        sheet.used_range.last_cell.row = len(values) if last_row is None else last_row
+        sheet.used_range.last_cell.column = len(values[0]) if last_column is None else last_column
+        cells = sheet.range.return_value
+        cells.options.return_value.value = values
+        cells.api.value2.get.return_value = precise
+        return book, sheet
 
-    def test_snapshot_falls_back_to_system_temp_without_an_excel_container(self):
-        book, snapshot = self._snapshot_book()
-        with TemporaryDirectory() as home:
-            with patch.object(excel_access.sys, 'platform', 'darwin'), \
-                    patch.object(excel_access.Path, 'home', return_value=Path(home)):
-                self.assertIsNone(excel_access.snapshot_directory())
-                with patch.object(excel_access, 'active_book', return_value=book):
-                    with excel_access.active_sheet():
-                        path = Path(snapshot.save.call_args.args[0])
-                        self.assertEqual(path.parent.parent, Path(tempfile.gettempdir()))
-            self.assertFalse(Path(home, 'Library').exists())
+    @contextlib.contextmanager
+    def _mac_sheet(self, book):
+        with patch.object(excel_access.sys, 'platform', 'darwin'), \
+                patch.object(excel_access, 'TemporaryDirectory') as temporary, \
+                patch.object(excel_access, 'active_book', return_value=book):
+            with excel_access.active_sheet() as sheet:
+                yield sheet
+            # A 1-D result would silently transpose the sheet, so pin the option.
+            book.sheets.active.range.return_value.options.assert_called_once_with(ndim=2)
+            # Mac must never ask sandboxed Excel to write anything, anywhere.
+            temporary.assert_not_called()
+            book.app.books.add.assert_not_called()
+            book.activate.assert_not_called()
+            book.save.assert_not_called()
 
-    def test_snapshot_falls_back_to_system_temp_when_the_container_folder_is_unusable(self):
-        with TemporaryDirectory() as home:
-            container = Path(home) / 'Library/Containers/com.microsoft.Excel/Data'
-            container.mkdir(parents=True)
-            (container / 'SpDocumentsConverter').write_text('a stray file of that name')
-            with patch.object(excel_access.sys, 'platform', 'darwin'), \
-                    patch.object(excel_access.Path, 'home', return_value=Path(home)):
-                self.assertIsNone(excel_access.snapshot_directory())
+    def test_mac_snapshot_reads_values_instead_of_saving_a_file(self):
+        stamp = datetime.datetime(2025, 12, 24, 9, 30)
+        error = object()
+        book, _ = self._mac_book(
+            [['한글', 2.0, None, error],
+             [stamp, 3291.6667, True, '줄\x07바꿈']],
+            [['한글', 2.0, '', error],
+             [46000.0, 3291.6666666666665, True, '줄\x07바꿈']])
+        with self._mac_sheet(book) as sheet:
+            rows = list(sheet.values)
+        # 2.0 comes back as int, the error cell as None, and the date as a date.
+        self.assertEqual(rows[0], ('한글', 2, None, None))
+        self.assertEqual((rows[1][0], rows[1][2], rows[1][3]), (stamp, True, '줄바꿈'))
+        # value2 keeps the digits .value rounds off; openpyxl then stores 16 of them.
+        self.assertNotEqual(rows[1][1], 3291.6667)
+        self.assertAlmostEqual(rows[1][1], 3291.6666666666665, places=9)
 
-    def test_windows_snapshot_keeps_using_the_system_temp(self):
-        with patch.object(excel_access.sys, 'platform', 'win32'):
-            self.assertIsNone(excel_access.snapshot_directory())
+    def test_mac_snapshot_of_an_empty_sheet_has_no_rows(self):
+        book, _ = self._mac_book([[None]], '')
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [])
+
+    def test_mac_snapshot_reads_a_single_cell_sheet(self):
+        book, _ = self._mac_book([['한 칸']], '한 칸')
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [('한 칸',)])
+
+    def test_mac_snapshot_keeps_text_that_looks_like_a_formula_or_an_error(self):
+        row = ['=SUM(A1)', '#VALUE!', '한글']
+        book, _ = self._mac_book([row], [row])
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [tuple(row)])
+
+    def test_mac_snapshot_reads_a_single_row_without_transposing_it(self):
+        book, _ = self._mac_book([[1.0, 2.0, 3.0]], [1.5, 2.5, 3.5])
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [(1.5, 2.5, 3.5)])
+
+    def test_mac_snapshot_reads_a_single_column_without_transposing_it(self):
+        book, _ = self._mac_book([[1.0], [2.0], [3.0]], [1.5, 2.5, 3.5])
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [(1.5,), (2.5,), (3.5,)])
+
+    def test_mac_snapshot_survives_a_short_or_missing_value2_result(self):
+        values = [['한글', 2.5], [3.5, '나라']]
+        for precise in (None, [['한글', 2.25]]):
+            with self.subTest(precise=precise):
+                book, _ = self._mac_book(values, precise)
+                with self._mac_sheet(book) as sheet:
+                    rows = list(sheet.values)
+                # Whatever value2 omits keeps the rounded .value instead of raising.
+                self.assertEqual(rows[1], (3.5, '나라'))
+                self.assertEqual(rows[0][0], '한글')
+                self.assertIn(rows[0][1], (2.5, 2.25))
+
+    def test_mac_snapshot_reads_from_a1_whatever_the_used_range_starts_at(self):
+        # A used range of B3:D7 still has to keep every value at its own address.
+        values = [[None] * 4 for _ in range(7)]
+        values[2][1] = '가'
+        book, sheet = self._mac_book(values, [[''] * 4] * 7, last_row=7, last_column=4)
+        with self._mac_sheet(book) as snapshot:
+            self.assertEqual(list(snapshot.values)[2][1], '가')
+        sheet.range.assert_called_once_with((1, 1), (7, 4))
+
+    def test_mac_snapshot_stops_at_the_row_and_column_caps(self):
+        book, sheet = self._mac_book([['한글']], [['한글']], last_row=1048576, last_column=16384)
+        with self._mac_sheet(book):
+            pass
+        sheet.range.assert_called_once_with(
+            (1, 1), (excel_access.MAX_SNAPSHOT_ROW, excel_access.MAX_SNAPSHOT_COLUMN))
+        self.assertLessEqual(
+            excel_access.MAX_SNAPSHOT_ROW * excel_access.MAX_SNAPSHOT_COLUMN, 2_000_000)
+
+    def test_mac_snapshot_drops_a_formatted_but_empty_tail(self):
+        values = [['품목', '수량', '금액', None, None]]
+        values.append(['사과', 2.0, 3000.0, None, None])
+        values.append(['배', 1.0, 2500.0, None, None])
+        values.extend([[None] * 5 for _ in range(400)])
+        book, _ = self._mac_book(values, [[''] * 5 for _ in values])
+        with self._mac_sheet(book) as sheet:
+            rows = list(sheet.values)
+        # Only the two empty trailing columns and the 400 empty rows go away.
+        self.assertEqual(rows, [('품목', '수량', '금액'), ('사과', 2, 3000), ('배', 1, 2500)])
+
+    def test_mac_snapshot_keeps_blank_rows_and_cells_inside_the_data(self):
+        values = [['가', None, '나'], [None, None, None], [None, '다', None]]
+        book, _ = self._mac_book(values, [[''] * 3 for _ in values])
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [('가', None, '나'), (None, None, None), (None, '다', None)])
+
+    def test_mac_snapshot_stores_an_aware_datetime_without_its_timezone(self):
+        aware = datetime.datetime(2025, 12, 24, 9, 30, tzinfo=datetime.timezone.utc)
+        book, _ = self._mac_book([[aware]], [[46015.0]])
+        with self._mac_sheet(book) as sheet:
+            self.assertEqual(list(sheet.values), [(aware.replace(tzinfo=None),)])
 
     def test_failed_snapshot_closes_only_the_copy(self):
         book = MagicMock()
         snapshot = book.app.books.add.return_value
         snapshot.save.side_effect = OSError('cannot save')
-        with self._system_temp_snapshots(), patch.object(excel_access, 'active_book', return_value=book):
+        with self._on_windows(), patch.object(excel_access, 'active_book', return_value=book):
             with self.assertRaisesRegex(OSError, 'cannot save'):
                 with excel_access.active_sheet():
                     self.fail('A failed snapshot must not be exposed')
@@ -180,7 +262,7 @@ class DesktopOperationTests(unittest.TestCase):
         caught = None
         writer = None
         with TemporaryDirectory() as output_directory, \
-                self._system_temp_snapshots(), \
+                self._on_windows(), \
                 patch.object(excel_access, 'active_book', return_value=book), \
                 patch.object(ecount_writer_module, 'getTempDir', return_value=output_directory), \
                 patch.object(ecount_writer_module, 'open_file', side_effect=opener_error):

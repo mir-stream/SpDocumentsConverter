@@ -1,5 +1,6 @@
 """Read saved workbooks or take a temporary snapshot of desktop Excel."""
 
+import datetime
 import io
 import sys
 from contextlib import contextmanager
@@ -7,32 +8,105 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import openpyxl
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 
 SNAPSHOT_SHEET = 'ConverterInput'
 
+# Bound the Mac value read, and the workbook built from it, for a sheet whose used
+# range was blown up by whole-sheet formatting: one huge Apple Event times out
+# (-1712), and openpyxl needs seconds and hundreds of MB for a million cells. Real
+# order sheets run to a few thousand rows and some 30 columns, well inside both.
+MAX_SNAPSHOT_ROW = 20000
+MAX_SNAPSHOT_COLUMN = 64
 
-def snapshot_directory():
-    """Return the parent for the snapshot temp directory, or None for system temp.
+# Everything openpyxl can store. Anything else (an appscript keyword for an error
+# cell, for instance) becomes None, which the readers already treat as a non-number.
+STORABLE = (str, bool, int, float, datetime.datetime, datetime.date, datetime.time)
 
-    Mac Excel is sandboxed, so saving into /private/var/folders/.../T/ triggers a
-    "파일 접근 권한 부여" (Grant File Access) prompt and fails with OSERROR -50 when
-    it is cancelled. Its own container is writable without a prompt, so keep an
-    own folder there instead of Data/tmp, which Office sweeps for its scratch files.
-    """
-    if sys.platform != 'darwin':
+
+def _grid(values, rows):
+    """Normalise an Apple Event result into a list of row lists."""
+    if not isinstance(values, list):
+        return [[values]]
+    if not values or not isinstance(values[0], list):
+        # Excel flattens a single row, and a single column, into one list.
+        return [list(values)] if rows == 1 else [[value] for value in values]
+    return [list(row) for row in values]
+
+
+def _at(grid, index, column):
+    if index >= len(grid) or column >= len(grid[index]):
         return None
-    container = Path.home() / 'Library/Containers/com.microsoft.Excel/Data'
-    if not container.is_dir():
-        return None
-    directory = container / 'SpDocumentsConverter'
+    return grid[index][column]
+
+
+def _storable(value, precise):
+    # .value rounds floats to 4 decimals, while value2 keeps every digit but turns
+    # dates into serial numbers, so take the precise number only for a number.
+    if isinstance(value, float) and isinstance(precise, (int, float)) and not isinstance(precise, bool):
+        value = precise
+    if isinstance(value, str):
+        return ILLEGAL_CHARACTERS_RE.sub('', value)
+    if isinstance(value, (datetime.datetime, datetime.time)) and value.tzinfo is not None:
+        # openpyxl refuses a timezone, and a sheet's clock time carries none anyway.
+        return value.replace(tzinfo=None)
+    return value if isinstance(value, STORABLE) else None
+
+
+def _trim(grid):
+    """Drop the formatted-but-empty tail, which openpyxl would pay rows and memory for."""
+    while grid and all(value is None for value in grid[-1]):
+        grid.pop()
+    width = max((len(row) for row in grid), default=0)
+    while width and all(_at(grid, index, width - 1) is None for index in range(len(grid))):
+        width -= 1
+    # Leading and interior blanks stay: every value keeps the address it has in Excel.
+    return [row[:width] for row in grid] if width else []
+
+
+def _mac_sheet_values(sheet):
+    """Read the active sheet's values over Apple Events, without writing a file."""
+    last = sheet.used_range.last_cell
+    rows = min(last.row, MAX_SNAPSHOT_ROW)
+    columns = min(last.column, MAX_SNAPSHOT_COLUMN)
+    # Always read from A1 so every value keeps the position it has in the file.
+    cells = sheet.range((1, 1), (rows, columns))
+    values = _grid(cells.options(ndim=2).value, rows)
+    precise = _grid(cells.api.value2.get(), rows)
+    # value2 is a second Apple Event and may come back shorter, or as a bare scalar,
+    # so a missing cell falls back to the rounded .value rather than raising.
+    return _trim([
+        [_storable(value, _at(precise, index, column)) for column, value in enumerate(row)]
+        for index, row in enumerate(values)
+    ])
+
+
+@contextmanager
+def _snapshot_of(values):
+    source = openpyxl.Workbook()
+    buffer = io.BytesIO()
     try:
-        directory.mkdir(exist_ok=True)
-    except OSError:
-        # An unwritable container or a stray file of that name is not worth an
-        # error box; fall back to the system temp folder (which may prompt).
-        return None
-    return directory
+        sheet = source.active
+        sheet.title = SNAPSHOT_SHEET
+        for index, row in enumerate(values, start=1):
+            for column, value in enumerate(row, start=1):
+                if value is None:
+                    continue
+                cell = sheet.cell(row=index, column=column, value=value)
+                if isinstance(value, str):
+                    # Excel gave us text, so keep "=SUM(A1)" and "#VALUE!" as text.
+                    # Stored as a formula or an error they read back as None.
+                    cell.data_type = 's'
+        source.save(buffer)
+    finally:
+        source.close()
+    with buffer:
+        workbook = openpyxl.load_workbook(buffer, read_only=True, data_only=True)
+        try:
+            yield workbook[SNAPSHOT_SHEET]
+        finally:
+            workbook.close()
 
 
 def sheet_names(path):
@@ -71,7 +145,14 @@ def active_book():
 def active_sheet():
     book = active_book()
     sheet = book.sheets.active
-    with TemporaryDirectory(prefix='spdocuments-', dir=snapshot_directory()) as directory:
+    if sys.platform == 'darwin':
+        # Sandboxed Excel cannot save the snapshot without the "파일 접근 권한 부여"
+        # window, and returns OSERROR -50 when it is cancelled, so never ask it to
+        # write a file on Mac. Read the values instead and build the copy in memory.
+        with _snapshot_of(_mac_sheet_values(sheet)) as snapshot_sheet:
+            yield snapshot_sheet
+        return
+    with TemporaryDirectory(prefix='spdocuments-') as directory:
         path = Path(directory) / 'input.xlsx'
         snapshot = None
         try:
